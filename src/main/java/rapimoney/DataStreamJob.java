@@ -18,67 +18,84 @@
 
 package rapimoney;
 
+
 import com.ververica.cdc.connectors.postgres.PostgreSQLSource;
 import com.ververica.cdc.debezium.JsonDebeziumDeserializationSchema;
-import org.apache.flink.api.java.DataSet;
-import org.apache.flink.api.java.ExecutionEnvironment;
-import org.apache.flink.api.java.aggregation.Aggregations;
-import org.apache.flink.api.java.tuple.Tuple2;
-import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.datastream.DataStream;
-import org.apache.flink.api.common.functions.FilterFunction;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.source.SourceFunction;
 
-/**
- * Skeleton for a Flink DataStream Job.
- *
- * <p>For a tutorial how to write a Flink application, check the
- * tutorials and examples on the <a href="https://flink.apache.org">Flink Website</a>.
- *
- * <p>To package your application into a JAR file for execution, run
- * 'mvn clean package' on the command line.
- *
- * <p>If you change the name of the main class (with the public static void main(String[] args))
- * method, change the respective entry in the POM.xml file (simply search for 'mainClass').
- */
+import org.apache.flink.table.api.DataTypes;
+import org.apache.flink.table.api.Schema;
+import org.apache.flink.table.api.Table;
+import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+import org.apache.flink.types.Row;
+
+import java.time.LocalDateTime;
+
+
 public class DataStreamJob {
 
 
 	public static void main( String[] args ) throws Exception{
 
-		// set up the execution environment
-		final ExecutionEnvironment env = ExecutionEnvironment.getExecutionEnvironment();
+//		SourceFunction<String> sourceFunction = getPostgresSource();
+		StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
 
-		// input data
-		// you can also use env.readTextFile(...) to get words
-		DataSet<String> text = env.fromElements(
-				"To be, or not to be,--that is the question:--",
-				"Whether 'tis nobler in the mind to suffer",
-				"The slings and arrows of outrageous fortune",
-				"Or to take arms against a sea of troubles,"
-		);
+//		env.addSource(sourceFunction)
+//				.print().setParallelism(1); // use parallelism 1 for sink to keep message ordering
 
-		DataSet<Tuple2<String, Integer>> counts =
-				// split up the lines in pairs (2-tuples) containing: (word,1)
-				text.flatMap( new LineSplitter() )
-						// group by the tuple field "0" and sum up tuple field "1"
-						.groupBy( 0 )
-						.aggregate( Aggregations.SUM, 1 );
+		StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
 
-		// emit result
-		counts.print();
+		// create a user stream
+		DataStream<Row> userStream = env
+				.fromElements(
+						Row.of(LocalDateTime.parse("2021-08-21T13:00:00"), 1, "Alice"),
+						Row.of(LocalDateTime.parse("2021-08-21T13:05:00"), 2, "Bob"),
+						Row.of(LocalDateTime.parse("2021-08-21T13:10:00"), 2, "Bob"))
+				.returns(
+						Types.ROW_NAMED(
+								new String[] {"ts", "uid", "name"},
+								Types.LOCAL_DATE_TIME, Types.INT, Types.STRING));
+
+		tableEnv.createTemporaryView(
+				"UserTable",
+				userStream,
+				Schema.newBuilder()
+						.column("ts", DataTypes.TIMESTAMP(3))
+						.column("uid", DataTypes.INT())
+						.column("name", DataTypes.STRING())
+						.watermark("ts", "ts - INTERVAL '1' SECOND")
+						.build());
+
+
+		Table selectTable = tableEnv.sqlQuery("SELECT name, uid FROM UserTable");
+		DataStream<Row> joinedStream = tableEnv.toDataStream(selectTable);
+		joinedStream.print();
+
+
+		Table resultTable = tableEnv.sqlQuery("SELECT name, SUM(uid) FROM UserTable GROUP BY name");
+		DataStream<Row> resultStream = tableEnv.toChangelogStream(resultTable);
+		resultStream.print();
+
+		env.execute();
 	}
-	public SourceFunction<String> getPostgresSource() throws Exception {
+	public static SourceFunction<String> getPostgresSource() throws Exception {
 		SourceFunction<String> sourceFunction = PostgreSQLSource.<String>builder()
 				.hostname("localhost")
 				.port(5432)
-				.database("postgres") // monitor postgres database
-				.schemaList("inventory")  // monitor inventory schema
-				.tableList("inventory.products") // monitor products table
-				.username("flinkuser")
-				.password("flinkpw")
+				.database("mydatabase") // monitor postgres database
+				.schemaList("public")  // monitor inventory schema
+				.tableList("public.shipments") // monitor products table
+				.username("myuser")
+				.password("secret")
+				.decodingPluginName("pgoutput")
+				.slotName("flinktest1")
 				.deserializer(new JsonDebeziumDeserializationSchema()) // converts SourceRecord to JSON String
 				.build();
+
+		return sourceFunction;
 
 
 	}
